@@ -15,11 +15,22 @@ def calculate_cash_flows(inputs: Dict[str, Any]) -> Dict[str, Any]:
     wacc = float(inputs["wacc"])
     financing_rate = float(inputs.get("financing_rate", wacc))
     reinvestment_rate = float(inputs.get("reinvestment_rate", wacc))
-    growth_rate = float(inputs.get("growth_rate", 0))
+    revenue_growth = float(inputs.get("revenue_growth", inputs.get("growth_rate", 0)))
+    cost_growth = float(inputs.get("cost_growth", inputs.get("growth_rate", 0)))
+    terminal_growth = float(inputs.get("terminal_growth", 0))
     depreciation_rate = float(inputs.get("depreciation_rate", 0))
     currency = inputs.get("currency", "USD")
 
     depreciation = initial_investment * depreciation_rate if depreciation_rate > 0 else initial_investment / project_life
+
+    if terminal_value == 0 and terminal_growth > 0 and wacc > terminal_growth:
+        depreciation = initial_investment * depreciation_rate if depreciation_rate > 0 else initial_investment / project_life
+        last_revenue = annual_revenue * (1 + revenue_growth) ** (project_life - 1)
+        last_costs = operating_costs * (1 + cost_growth) ** (project_life - 1)
+        last_ebit = last_revenue - last_costs - depreciation
+        last_tax = last_ebit * tax_rate if last_ebit > 0 else 0
+        last_ocf = (last_ebit - last_tax) + depreciation
+        terminal_value = (last_ocf * (1 + terminal_growth)) / (wacc - terminal_growth)
 
     years = list(range(0, project_life + 1))
     cash_flows = []
@@ -27,6 +38,7 @@ def calculate_cash_flows(inputs: Dict[str, Any]) -> Dict[str, Any]:
     present_values = []
     cumulative_cash_flows = []
 
+    detailed_rows = []
     cumulative = 0.0
 
     for year in years:
@@ -37,25 +49,54 @@ def calculate_cash_flows(inputs: Dict[str, Any]) -> Dict[str, Any]:
             present_values.append(cf)
             cumulative += cf
             cumulative_cash_flows.append(cumulative)
+
+            detailed_rows.append({
+                "Year": 0,
+                "Revenue": 0, "Operating Costs": 0, "EBITDA": 0,
+                "Depreciation": 0, "EBIT": 0, "Tax": 0, "NOPAT": 0,
+                "OCF": 0, "Initial Investment": -initial_investment,
+                "Working Capital": -working_capital, "Terminal Value": 0,
+                "Net Cash Flow": cf,
+            })
         else:
-            growth = (1 + growth_rate) ** (year - 1)
-            rev = annual_revenue * growth
-            costs = operating_costs * growth
-            ebit = rev - costs - depreciation
-            taxes = ebit * tax_rate if ebit > 0 else 0
-            net_income = ebit - taxes
-            ocf = net_income + depreciation
+            rev = annual_revenue * (1 + revenue_growth) ** (year - 1)
+            costs = operating_costs * (1 + cost_growth) ** (year - 1)
+            ebitda = rev - costs
+            ebit = ebitda - depreciation
+            tax = ebit * tax_rate if ebit > 0 else 0
+            nopat = ebit - tax
+            ocf = nopat + depreciation
+
+            inv_outflow = 0
+            wc_outflow = 0
+            wc_recovery = 0
+            tv_inflow = 0
+
+            if year == 1 and working_capital > 0:
+                wc_outflow = -working_capital
 
             if year == project_life:
-                ocf += working_capital + terminal_value
+                wc_recovery = working_capital
+                tv_inflow = terminal_value
 
-            cash_flows.append(ocf)
+            net_cf = ocf + inv_outflow + wc_outflow + wc_recovery + tv_inflow
+
+            cash_flows.append(net_cf)
             df = 1 / (1 + wacc) ** year
             discount_factors.append(df)
-            pv = ocf * df
+            pv = net_cf * df
             present_values.append(pv)
-            cumulative += ocf
+            cumulative += net_cf
             cumulative_cash_flows.append(cumulative)
+
+            detailed_rows.append({
+                "Year": year,
+                "Revenue": rev, "Operating Costs": costs, "EBITDA": ebitda,
+                "Depreciation": depreciation, "EBIT": ebit, "Tax": tax, "NOPAT": nopat,
+                "OCF": ocf, "Initial Investment": 0,
+                "Working Capital": wc_outflow + wc_recovery, "Terminal Value": tv_inflow,
+                "Net Cash Flow": net_cf,
+            })
 
     total_pv_inflows = sum(present_values[1:])
     npv = sum(present_values)
@@ -71,19 +112,14 @@ def calculate_cash_flows(inputs: Dict[str, Any]) -> Dict[str, Any]:
 
     dcf_value = total_pv_inflows + (terminal_value / (1 + wacc) ** project_life) if terminal_value > 0 else total_pv_inflows
 
-    cash_flow_table = pd.DataFrame({
-        "Year": years,
-        "Cash Flow": cash_flows,
-        "Discount Factor": discount_factors,
-        "Present Value": present_values,
-        "Cumulative Cash Flow": cumulative_cash_flows,
-    })
+    cash_flow_table = pd.DataFrame(detailed_rows)
 
     dcf_table = pd.DataFrame({
         "Year": years,
         "Free Cash Flow": cash_flows,
         "Discount Factor": discount_factors,
-        "Present Value of Cash Flow": present_values,
+        "Present Value": present_values,
+        "Cumulative Present Value": np.cumsum(present_values),
     })
 
     return {
@@ -238,28 +274,28 @@ def calculate_all_metrics(inputs: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def calculate_sensitivity(inputs: Dict[str, Any], variable: str,
-                          min_change: float = -0.30, max_change: float = 0.30,
-                          steps: int = 13) -> Dict[str, Any]:
+                          changes: Optional[List[float]] = None) -> Dict[str, Any]:
+    if changes is None:
+        changes = [-0.30, 0.0, 0.30]
+
     base_value = float(inputs.get(variable, 0))
-    if base_value == 0 and variable not in ("growth_rate",):
+    if base_value == 0 and variable not in ("revenue_growth", "cost_growth"):
         base_value = 1.0
 
-    variations = np.linspace(min_change, max_change, steps)
     results = []
 
-    for var in variations:
+    for change in changes:
         modified = dict(inputs)
-        modified[variable] = base_value * (1 + var) if base_value != 0 else var
-
-        if variable == "tax_rate" or variable == "wacc" or variable == "financing_rate" or variable == "reinvestment_rate":
-            modified[variable] = base_value + var
-            modified[variable] = max(0, min(modified[variable], 1.0))
+        if variable in ("wacc", "tax_rate", "financing_rate", "reinvestment_rate"):
+            modified[variable] = max(0, min(1.0, base_value + change))
+        else:
+            modified[variable] = base_value * (1 + change) if base_value != 0 else change
 
         try:
             metrics = calculate_all_metrics(modified)
             results.append({
-                "variation": var,
-                "variation_pct": f"{var:+.0%}",
+                "variation": change,
+                "variation_pct": f"{change:+.0%}",
                 "npv": metrics["npv"],
                 "irr": metrics["irr"],
                 "mirr": metrics["mirr"],
@@ -273,35 +309,76 @@ def calculate_sensitivity(inputs: Dict[str, Any], variable: str,
     df = pd.DataFrame(results)
 
     npv_range = 0
+    npv_at_base = base_npv = 0
     if len(df) > 0:
         npv_range = df["npv"].max() - df["npv"].min()
+        base_row = df[df["variation"] == 0]
+        if not base_row.empty:
+            base_npv = base_row["npv"].iloc[0]
+        else:
+            base_npv = np.nan
+
+    npv_minus = np.interp(-0.30, df["variation"], df["npv"]) if len(df) >= 2 else base_npv
+    npv_plus = np.interp(0.30, df["variation"], df["npv"]) if len(df) >= 2 else base_npv
 
     return {
         "variable": variable,
         "base_value": base_value,
         "results": df,
         "npv_range": npv_range,
-        "variations": variations.tolist(),
+        "npv_at_base": base_npv,
+        "npv_at_minus30": npv_minus,
+        "npv_at_plus30": npv_plus,
     }
 
 
 def calculate_full_sensitivity(inputs: Dict[str, Any]) -> Dict[str, Any]:
     variables = ["wacc", "annual_revenue", "operating_costs", "initial_investment"]
-    growth_rate = inputs.get("growth_rate", 0)
-    if growth_rate:
-        variables.append("growth_rate")
+    revenue_growth = inputs.get("revenue_growth", inputs.get("growth_rate", 0))
+    cost_growth = inputs.get("cost_growth", inputs.get("growth_rate", 0))
+
+    variable_labels = {
+        "wacc": "Discount Rate (WACC)",
+        "annual_revenue": "Annual Revenues",
+        "operating_costs": "Operating Costs",
+        "initial_investment": "Initial Investment",
+        "revenue_growth": "Revenue Growth",
+        "cost_growth": "Cost Growth",
+    }
 
     sensitivities = {}
     for var in variables:
         if var in inputs:
-            sensitivities[var] = calculate_sensitivity(inputs, var)
+            sens = calculate_sensitivity(inputs, var)
+            sens["label"] = variable_labels.get(var, var)
+            sensitivities[var] = sens
 
-    ranked = sorted(sensitivities.items(), key=lambda x: x[1]["npv_range"], reverse=True)
-    ranking = [{"variable": v, "npv_range": s["npv_range"]} for v, s in ranked]
+    if revenue_growth:
+        sens = calculate_sensitivity(inputs, "revenue_growth")
+        sens["label"] = "Revenue Growth"
+        sensitivities["revenue_growth"] = sens
+
+    if cost_growth:
+        sens = calculate_sensitivity(inputs, "cost_growth")
+        sens["label"] = "Cost Growth"
+        sensitivities["cost_growth"] = sens
+
+    ranking = []
+    for var, sens in sensitivities.items():
+        ranking.append({
+            "variable": var,
+            "label": sens.get("label", var),
+            "npv_range": sens["npv_range"],
+            "npv_at_base": sens.get("npv_at_base", 0),
+            "npv_at_minus30": sens.get("npv_at_minus30", 0),
+            "npv_at_plus30": sens.get("npv_at_plus30", 0),
+        })
+
+    ranked = sorted(ranking, key=lambda x: x["npv_range"], reverse=True)
 
     return {
         "sensitivities": sensitivities,
-        "ranking": ranking,
-        "most_sensitive": ranking[0]["variable"] if ranking else None,
-        "least_sensitive": ranking[-1]["variable"] if ranking else None,
+        "ranking": ranked,
+        "most_sensitive": ranked[0]["label"] if ranked else None,
+        "least_sensitive": ranked[-1]["label"] if ranked else None,
     }

@@ -21,7 +21,7 @@ from report_generator import generate_management_report
 from email_service import send_report_email, build_email_body
 
 st.set_page_config(
-    page_title="Financial Engineering Investment Decision Agent",
+    page_title="Integrated Investment Decision Agent for Capital Projects",
     page_icon=":material/account_balance:",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -404,7 +404,9 @@ def sidebar_inputs():
         data["wacc"] = st.sidebar.number_input("WACC / Discount Rate (%)", min_value=0.1, max_value=50.0, value=10.0, step=0.5) / 100
         data["financing_rate"] = st.sidebar.number_input("Financing Rate (%)", min_value=0.1, max_value=50.0, value=8.0, step=0.5) / 100
         data["reinvestment_rate"] = st.sidebar.number_input("Reinvestment Rate (%)", min_value=0.0, max_value=30.0, value=6.0, step=0.5) / 100
-        data["growth_rate"] = st.sidebar.number_input("Growth Rate (%)", min_value=0.0, max_value=50.0, value=3.0, step=0.5) / 100
+        data["revenue_growth"] = st.sidebar.number_input("Revenue Growth (%/yr)", min_value=0.0, max_value=50.0, value=3.0, step=0.5) / 100
+        data["cost_growth"] = st.sidebar.number_input("Cost Growth (%/yr)", min_value=0.0, max_value=50.0, value=3.0, step=0.5) / 100
+        data["terminal_growth"] = st.sidebar.number_input("Terminal Growth (%/yr)", min_value=0.0, max_value=30.0, value=0.0, step=0.5) / 100
         data["depreciation_rate"] = st.sidebar.number_input("Depreciation Rate (%)", min_value=0.0, max_value=100.0, value=10.0, step=1.0) / 100
 
     return data
@@ -479,10 +481,12 @@ def tab_capital_budgeting(metrics, inputs):
 
     st.subheader("Cash Flow Analysis")
     cf_table = metrics["cash_flow_table"].copy()
-    cf_table["Cash Flow"] = cf_table["Cash Flow"].apply(lambda x: format_currency(x, currency))
-    cf_table["Discount Factor"] = cf_table["Discount Factor"].apply(lambda x: f"{x:.4f}")
-    cf_table["Present Value"] = cf_table["Present Value"].apply(lambda x: format_currency(x, currency))
-    cf_table["Cumulative Cash Flow"] = cf_table["Cumulative Cash Flow"].apply(lambda x: format_currency(x, currency))
+
+    format_cols = [c for c in cf_table.columns if c not in ("Year", "Initial Investment", "Working Capital", "Terminal Value")]
+    for c in format_cols:
+        if c in cf_table.columns and c != "Year":
+            cf_table[c] = cf_table[c].apply(lambda x: format_currency(x, currency) if isinstance(x, (int, float)) else x)
+
     st.dataframe(cf_table, use_container_width=True, hide_index=True)
 
     st.plotly_chart(create_cash_flow_chart(metrics), use_container_width=True)
@@ -505,7 +509,8 @@ def tab_dcf(metrics, inputs):
     dcf_table = metrics["dcf_table"].copy()
     dcf_table["Free Cash Flow"] = dcf_table["Free Cash Flow"].apply(lambda x: format_currency(x, currency))
     dcf_table["Discount Factor"] = dcf_table["Discount Factor"].apply(lambda x: f"{x:.4f}")
-    dcf_table["Present Value of Cash Flow"] = dcf_table["Present Value of Cash Flow"].apply(lambda x: format_currency(x, currency))
+    dcf_table["Present Value"] = dcf_table["Present Value"].apply(lambda x: format_currency(x, currency))
+    dcf_table["Cumulative Present Value"] = dcf_table["Cumulative Present Value"].apply(lambda x: format_currency(x, currency))
     st.dataframe(dcf_table, use_container_width=True, hide_index=True)
 
     st.plotly_chart(create_pv_chart(metrics), use_container_width=True)
@@ -591,16 +596,13 @@ def tab_risk(risk_data):
 
     for risk in risk_data["risks"]:
         severity = risk["severity"]
-        with st.expander(f"{risk['name']} - {severity}", expanded=(severity == "HIGH")):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(f"**Severity:** {severity} ({risk['severity_score']}/10)")
-                st.markdown(f"**Impact Area:** {risk['impact']}")
-            with col2:
-                st.markdown("**Explanation:**")
-                st.write(risk["explanation"])
-            st.markdown("**Mitigation:**")
-            st.write(risk["mitigation"])
+        impact_text = risk.get("impact_text", risk.get("impact", ""))
+        with st.expander(f"{risk['name']} - {severity}", expanded=(severity in ("HIGH", "VERY HIGH", "MODERATE"))):
+            st.markdown(
+                f"**{risk['name']}:** {severity} | **Impact:** {impact_text}"
+            )
+            st.write(risk["explanation"])
+            st.markdown("**Possible mitigation:** " + risk["mitigation"])
 
 
 def tab_scenario(scenario_data, inputs):
@@ -626,45 +628,121 @@ def tab_scenario(scenario_data, inputs):
                 pb = scenario["payback"]
                 st.metric("Payback", f"{pb:.1f} yrs" if pb != float("inf") else "N/A")
 
+            scenario_reason = scenario.get("scenario_reason", scenario["npv_status"]["reason"])
             decision = scenario["npv_status"]["decision"]
             if decision == "ACCEPT":
-                st.success(f"**Decision: {decision}** - {scenario['npv_status']['reason']}")
+                st.success(f"**Decision: {decision}** - {scenario_reason}")
             elif decision == "REJECT":
-                st.error(f"**Decision: {decision}** - {scenario['npv_status']['reason']}")
+                st.error(f"**Decision: {decision}** - {scenario_reason}")
             else:
-                st.warning(f"**Decision: {decision}** - {scenario['npv_status']['reason']}")
+                st.warning(f"**Decision: {decision}** - {scenario_reason}")
 
 
 def tab_sensitivity(sensitivity_data, inputs):
     st.header("Sensitivity Analysis")
 
-    if sensitivity_data.get("ranking"):
-        st.subheader("Variable Sensitivity Ranking")
-        rank_df = pd.DataFrame(sensitivity_data["ranking"])
-        rank_df.columns = ["Variable", "NPV Range Impact ($)"]
-        st.dataframe(rank_df, use_container_width=True, hide_index=True)
+    ranking = sensitivity_data.get("ranking", [])
 
-        st.info(
-            f"**Most sensitive variable:** {sensitivity_data['most_sensitive']} - "
-            f"Changes in this variable have the largest impact on project value.\n\n"
-            f"**Least sensitive variable:** {sensitivity_data['least_sensitive']} - "
-            f"Changes in this variable have the smallest impact on project value."
-        )
+    if ranking:
+        st.subheader("Sensitivity Summary")
+        summary_rows = []
+        for idx, item in enumerate(ranking):
+            summary_rows.append({
+                "Variable": item.get("label", item.get("variable", "")),
+                "Id": item.get("variable", ""),
+                "NPV at -30%": format_currency(item.get("npv_at_minus30", 0)),
+                "NPV at Base": format_currency(item.get("npv_at_base", 0)),
+                "NPV at +30%": format_currency(item.get("npv_at_plus30", 0)),
+                "Spread": format_currency(item.get("npv_range", 0)),
+            })
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+        if sensitivity_data.get("most_sensitive") and sensitivity_data.get("least_sensitive"):
+            st.info(
+                f"The most sensitive variable is **{sensitivity_data['most_sensitive']}** and the least "
+                f"sensitive is **{sensitivity_data['least_sensitive']}**. Management should prioritise "
+                f"review, hedging and control of the most sensitive variable because small deviations "
+                f"from the assumption have the largest impact on project value and on the investment decision."
+            )
 
     tornado = create_sensitivity_tornado(sensitivity_data)
     if tornado:
         st.plotly_chart(tornado, use_container_width=True)
 
-    st.subheader("Detailed Sensitivity Charts")
-    for var_name, sens_data in sensitivity_data.get("sensitivities", {}).items():
-        with st.expander(f"Sensitivity: {var_name}"):
+    sens_map = sensitivity_data.get("sensitivities", {})
+
+    st.subheader("Per-Variable Analysis")
+    for item in ranking:
+        var_name = item.get("variable", "")
+        sens = sens_map.get(var_name)
+        if sens is None:
+            continue
+        label = sens.get("label", var_name)
+        with st.expander(f"{label}"):
+            npv_minus = item.get("npv_at_minus30", 0)
+            npv_base = item.get("npv_at_base", 0)
+            npv_plus = item.get("npv_at_plus30", 0)
+
+            st.markdown(
+                f"NPV swings from {format_currency(npv_minus)} to {format_currency(npv_plus)} "
+                f"around the base {format_currency(npv_base)}."
+            )
+
+            if var_name == "wacc":
+                st.write(
+                    "Raising the WACC reduces the present value of future cash flows, lowering NPV "
+                    "(discounting effect); lowering it does the reverse. This reflects how expensive "
+                    "the project's capital is."
+                )
+            elif var_name in ("annual_revenue",):
+                st.write(
+                    "Revenues are the primary inflow driver. Higher revenue raises cash flows and NPV; "
+                    "lower revenue erodes them, and the effect compounds over the project life."
+                )
+            elif var_name in ("operating_costs",):
+                st.write(
+                    "Operating costs subtract directly from cash flows. Higher costs depress NPV and lower "
+                    "costs improve it, with the swing persisting across every year of the project."
+                )
+            elif var_name in ("initial_investment",):
+                st.write(
+                    "The initial investment sets the baseline outlay. A larger outlay reduces NPV "
+                    "one-for-one in present-value terms; a smaller one improves it."
+                )
+            elif var_name in ("revenue_growth",):
+                st.write(
+                    "Revenue growth compounds inflows over the project life. Higher growth raises terminal "
+                    "and early-period cash flows, boosting NPV; lower growth reduces project value."
+                )
+            elif var_name in ("cost_growth",):
+                st.write(
+                    "Cost growth compounds outflows over the life. Higher cost growth erodes margins and NPV; "
+                    "lower cost growth protects value."
+                )
+            else:
+                st.write(
+                    f"Changes in {label} affect project cash flows and thus NPV. The magnitude of impact "
+                    f"depends on how central this assumption is to the project's economics."
+                )
+
             line_chart = create_sensitivity_line_chart(sensitivity_data, var_name)
             if line_chart:
                 st.plotly_chart(line_chart, use_container_width=True)
 
-            df = sens_data["results"]
+            df = sens["results"]
             if not df.empty:
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                df_disp = df.copy()
+                for c in ["npv", "payback"]:
+                    if c in df_disp.columns:
+                        df_disp[c] = df_disp[c].apply(
+                            lambda x: format_currency(x) if c == "npv" else (f"{x:.1f}" if x != float("inf") else "Never")
+                        )
+                for c in ["irr", "mirr", "roi"]:
+                    if c in df_disp.columns:
+                        df_disp[c] = df_disp[c].apply(lambda x: format_pct(x))
+                if "pi" in df_disp.columns:
+                    df_disp["pi"] = df_disp["pi"].apply(lambda x: f"{x:.2f}")
+                st.dataframe(df_disp, use_container_width=True, hide_index=True)
 
 
 def tab_fx(inputs, fx_rates):
@@ -860,6 +938,26 @@ def tab_email(inputs, metrics, final_decision):
     st.header("Email Management Report")
     st.write("Send the investment analysis via email with the management report attached.")
 
+    smtp_host = os.environ.get("SMTP_HOST", "")
+    smtp_port = os.environ.get("SMTP_PORT", "")
+    smtp_user = os.environ.get("SMTP_USER", os.environ.get("SMTP_USERNAME", ""))
+    smtp_pass = os.environ.get("SMTP_PASS", os.environ.get("SMTP_PASSWORD", ""))
+    smtp_from = os.environ.get("SMTP_FROM", "")
+
+    with st.container(border=True):
+        col_a, col_b, col_c, col_d, col_e = st.columns(5)
+        col_a.metric("SMTP_HOST", "OK" if smtp_host else "MISSING")
+        col_b.metric("SMTP_PORT", "OK" if smtp_port else "MISSING")
+        col_c.metric("SMTP_USER", "OK" if smtp_user else "MISSING")
+        col_d.metric("SMTP_PASS", "OK" if smtp_pass else "MISSING")
+        col_e.metric("SMTP_FROM", "OK" if smtp_from else "MISSING")
+
+    if not all([smtp_host, smtp_port, smtp_user, smtp_pass, smtp_from]):
+        st.warning(
+            "SMTP environment variables are not fully configured. Set SMTP_HOST, SMTP_PORT, "
+            "SMTP_USERNAME, SMTP_PASSWORD and SMTP_FROM before sending."
+        )
+
     recipient = st.text_input("Recipient Email")
     subject = st.text_input("Subject", value=f"Investment Decision Report - {inputs.get('project_name', 'Project')}")
 
@@ -870,20 +968,12 @@ def tab_email(inputs, metrics, final_decision):
         mirr=metrics["mirr"],
         roi=metrics["roi"],
         payback=metrics["payback"],
-        risk_level="N/A",
+        risk_level="LOW",
         decision=final_decision["decision"],
         main_reason=final_decision.get("reason", ""),
         currency=inputs.get("currency", "USD"),
     )
     message = st.text_area("Email Message", value=default_body, height=300)
-
-    st.info(
-        "To use the email feature, set these environment variables:\n"
-        "- SMTP_HOST (e.g., smtp.gmail.com)\n"
-        "- SMTP_PORT (e.g., 587)\n"
-        "- SMTP_USER (your email address)\n"
-        "- SMTP_PASS (your app password)"
-    )
 
     if st.button("Send Email", type="primary"):
         if not recipient:
@@ -976,8 +1066,18 @@ def tab_assumptions():
 
 
 def main():
-    st.title("Financial Engineering Investment Decision Agent")
-    st.markdown("*Professional investment analysis for any organization — CALCULATE → COMPARE → DECIDE → EXPLAIN WHY*")
+    st.title("Integrated Investment Decision Agent for Capital Projects")
+    st.markdown(
+        "*Industry-independent capital budgeting, DCF, risk, scenario and decision engine.*"
+    )
+    st.markdown(
+        "**Workflow:** Investment Proposal → Capital Budgeting → DCF → Returns → Risk → "
+        "Scenario & Sensitivity → Final Decision → Management Report → Email"
+    )
+    st.markdown(
+        "This is a professional analysis tool. Every metric is calculated, compared against a "
+        "threshold, converted into a decision and explained in plain financial language."
+    )
     st.markdown("---")
 
     fx_rates = fetch_fx_rates()

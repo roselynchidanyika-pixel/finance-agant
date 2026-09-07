@@ -19,6 +19,9 @@ REQUIRED_FIELDS = {
 
 OPTIONAL_FIELDS = {
     "growth_rate": (int, float),
+    "revenue_growth": (int, float),
+    "cost_growth": (int, float),
+    "terminal_growth": (int, float),
     "depreciation_rate": (int, float),
     "currency": str,
 }
@@ -30,7 +33,15 @@ EXTREME_THRESHOLDS = {
     "reinvestment_rate": (-0.10, 0.30),
     "project_life": (1, 100),
     "operating_costs": (0, None),
+    "revenue_growth": (-0.50, 0.50),
+    "cost_growth": (-0.50, 0.50),
+    "terminal_growth": (-0.20, 0.30),
 }
+
+RATE_FIELDS = [
+    "growth_rate", "revenue_growth", "cost_growth", "terminal_growth",
+    "depreciation_rate", "tax_rate", "wacc", "financing_rate", "reinvestment_rate",
+]
 
 
 def validate_project_inputs(data: Dict[str, Any]) -> Tuple[bool, List[str], List[str]]:
@@ -113,6 +124,27 @@ def validate_project_inputs(data: Dict[str, Any]) -> Tuple[bool, List[str], List
         except (ValueError, TypeError):
             pass
 
+    for rf in RATE_FIELDS:
+        if rf in data:
+            try:
+                val = float(data[rf])
+                if val is None or val != val:
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+    if "terminal_growth" in data and "wacc" in data:
+        try:
+            tg = float(data["terminal_growth"])
+            wacc = float(data["wacc"])
+            if tg >= wacc:
+                errors.append(
+                    f"Terminal growth ({tg:.1%}) must be below the WACC ({wacc:.1%}) "
+                    "for the Gordon growth model to produce a valid terminal value."
+                )
+        except (ValueError, TypeError):
+            pass
+
     if "wacc" in data and "financing_rate" in data:
         try:
             wacc = float(data["wacc"])
@@ -188,6 +220,9 @@ def get_default_inputs() -> Dict[str, Any]:
         "financing_rate": 0.08,
         "reinvestment_rate": 0.06,
         "growth_rate": 0.03,
+        "revenue_growth": 0.03,
+        "cost_growth": 0.03,
+        "terminal_growth": 0.0,
         "depreciation_rate": 0.10,
         "currency": "USD",
     }

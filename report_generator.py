@@ -201,7 +201,9 @@ def _add_input_assumptions(doc, inputs):
         ["WACC", format_pct(float(inputs.get('wacc', 0.1)))],
         ["Financing Rate", format_pct(float(inputs.get('financing_rate', 0.08)))],
         ["Reinvestment Rate", format_pct(float(inputs.get('reinvestment_rate', 0.06)))],
-        ["Growth Rate", format_pct(float(inputs.get('growth_rate', 0.03)))],
+        ["Revenue Growth", format_pct(float(inputs.get('revenue_growth', inputs.get('growth_rate', 0.03))))],
+        ["Cost Growth", format_pct(float(inputs.get('cost_growth', inputs.get('growth_rate', 0.03))))],
+        ["Terminal Growth", format_pct(float(inputs.get('terminal_growth', 0)))],
         ["Depreciation Rate", format_pct(float(inputs.get('depreciation_rate', 0.1)))],
     ]
     _add_styled_table(doc, ["Parameter", "Value"], assumptions)
@@ -242,17 +244,31 @@ def _add_capital_budgeting(doc, metrics):
     from data_validation import format_currency
 
     table_data = metrics["cash_flow_table"]
-    headers = ["Year", "Cash Flow", "Discount Factor", "Present Value", "Cumulative CF"]
+    headers = [c for c in table_data.columns]
     rows = []
     for _, row in table_data.iterrows():
-        rows.append([
+        row_vals = []
+        for c in headers:
+            v = row[c]
+            if c == "Year":
+                row_vals.append(int(v))
+            else:
+                row_vals.append(format_currency(v))
+        rows.append(row_vals)
+    _add_styled_table(doc, headers, rows)
+
+    dcf_data = metrics["dcf_table"]
+    dcf_headers = ["Year", "Net Cash Flow", "Discount Factor", "Present Value", "Cumulative PV"]
+    dcf_rows = []
+    for _, row in dcf_data.iterrows():
+        dcf_rows.append([
             int(row["Year"]),
-            format_currency(row["Cash Flow"]),
+            format_currency(row["Free Cash Flow"]),
             f"{row['Discount Factor']:.4f}",
             format_currency(row["Present Value"]),
-            format_currency(row["Cumulative Cash Flow"]),
+            format_currency(row["Cumulative Present Value"]),
         ])
-    _add_styled_table(doc, headers, rows)
+    _add_styled_table(doc, dcf_headers, dcf_rows)
 
 
 def _add_dcf_valuation(doc, metrics, inputs):
@@ -366,7 +382,7 @@ def _add_risk_analysis(doc, risk_data):
     headers = ["Risk Factor", "Severity", "Impact", "Mitigation"]
     rows = []
     for risk in risk_data["risks"]:
-        rows.append([risk["name"], risk["severity"], risk["impact"], risk["mitigation"][:80] + "..."])
+        rows.append([risk["name"], risk["severity"], risk.get("impact_text", risk.get("impact", "")), risk["mitigation"][:80] + "..."])
     _add_styled_table(doc, headers, rows)
 
     for risk in risk_data["risks"]:
@@ -398,11 +414,13 @@ def _add_scenario_analysis(doc, scenario_data):
             ["Decision", scenario["npv_status"]["decision"]],
         ]
         _add_styled_table(doc, ["Metric", "Value"], rows)
-        doc.add_paragraph(f"Explanation: {scenario['npv_status']['reason']}")
+        scenario_reason = scenario.get("scenario_reason", scenario["npv_status"]["reason"])
+        doc.add_paragraph(f"Explanation: {scenario_reason}")
 
 
 def _add_sensitivity_analysis(doc, sensitivity_data):
     _add_heading(doc, "16. Sensitivity Analysis")
+    from data_validation import format_currency
 
     if sensitivity_data.get("ranking"):
         doc.add_paragraph("Variable Sensitivity Ranking (by NPV impact):")
@@ -419,13 +437,21 @@ def _add_sensitivity_analysis(doc, sensitivity_data):
             f"Changes in this variable have the smallest impact on project value."
         )
 
-    for var_name, sens_data in sensitivity_data.get("sensitivities", {}).items():
-        _add_heading(doc, f"Sensitivity: {var_name}", level=2)
-        df = sens_data["results"]
-        if not df.empty:
-            headers = list(df.columns)
-            rows = df.values.tolist()
-            _add_styled_table(doc, headers, [[str(v) for v in row] for row in rows])
+    for item in sensitivity_data.get("ranking", []):
+        label = item.get("label", item.get("variable", ""))
+        _add_heading(doc, f"Sensitivity: {label}", level=2)
+        doc.add_paragraph(
+            f"NPV at -30%: {format_currency(item.get('npv_at_minus30', 0))} | "
+            f"NPV at base: {format_currency(item.get('npv_at_base', 0))} | "
+            f"NPV at +30%: {format_currency(item.get('npv_at_plus30', 0))}"
+        )
+        sens_data = sensitivity_data.get("sensitivities", {}).get(item.get("variable", ""))
+        if sens_data:
+            df = sens_data["results"]
+            if not df.empty:
+                headers = list(df.columns)
+                rows = df.values.tolist()
+                _add_styled_table(doc, headers, [[str(v) for v in row] for row in rows])
 
 
 def _add_fx_section(doc, fx_data):
