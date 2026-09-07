@@ -1,0 +1,16 @@
+parameter,value
+project_name,Sample Manufacturing Plant
+project_description,New manufacturing facility for consumer goods production
+initial_investment,5000000
+project_life,10
+annual_revenue,2000000
+operating_costs,800000
+tax_rate,0.25
+working_capital,500000
+terminal_value,1000000
+wacc,0.10
+financing_rate,0.08
+reinvestment_rate,0.06
+growth_rate,0.03
+depreciation_rate,0.10
+currency,USD
